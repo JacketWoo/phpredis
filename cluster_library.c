@@ -947,7 +947,7 @@ PHP_REDIS_API int cluster_map_keyspace(redisCluster *c TSRMLS_DC) {
     clusterReply *slots=NULL;
     int mapped=0;
 
-    static int flag;
+    static int flag = 0;
     // Iterate over seeds until we can get slots
     for(zend_hash_internal_pointer_reset(c->seeds);
         !mapped && zend_hash_has_more_elements(c->seeds) == SUCCESS;
@@ -1016,7 +1016,7 @@ static int cluster_set_redirection(redisCluster* c, char *msg, int moved)
     *port++ = '\0';
 
     // Success, apply it
-    if (moved == REDIR_MOVED) {
+    if (moved) {
       slots_meta_reset(TSRMLS_CC);
     }
     c->redir_type = moved ? REDIR_MOVED : REDIR_ASK;
