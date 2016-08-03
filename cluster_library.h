@@ -53,9 +53,16 @@
 
 /* Lazy connect logic */
 #define CLUSTER_LAZY_CONNECT(s) \
+    int need_auth = 0; \
     if(s->lazy_connect) { \
         s->lazy_connect = 0; \
+        if (s->auth && s->auth_len && s->status != REDIS_SOCK_STATUS_CONNECTED) { \
+            need_auth = 1; \
+        } \
         redis_sock_server_open(s, 1 TSRMLS_CC); \
+        if (need_auth) { \
+            resend_auth(s TSRMLS_CC); \
+        } \
     }
 
 /* Clear out our "last error" */
@@ -222,6 +229,9 @@ typedef struct redisCluster {
     /* Object reference for Zend */
     zend_object std;
 
+    /* auth */
+    char *auth;
+    int auth_len;
     /* Timeout and read timeout (for normal operations) */
     double timeout;
     double read_timeout;
