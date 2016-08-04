@@ -215,7 +215,7 @@ typedef struct redisClusterNode {
 /* Forward declarations */
 typedef struct clusterFoldItem clusterFoldItem;
 
-typedef struct redisClusterCache redisClusterCache;
+//typedef struct redisClusterCache redisClusterCache;
 
 /* RedisCluster implementation structure */
 typedef struct redisCluster {

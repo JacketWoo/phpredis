@@ -561,23 +561,19 @@ void redis_cluster_init(redisCluster *c, HashTable *ht_seeds, double timeout,
     c->waitms = (long)(timeout * 1000);
 
     /* If we're persistent, attempt to load cached map for nodes and keyspace */
-    if (persistent) {
-        len = cluster_hash_seeds(ht_seeds, &hash);
+    len = cluster_hash_seeds(ht_seeds, &hash);
 
-        if ((cc = cluster_load_cache(hash, len, &invalid TSRMLS_CC))) {
-            /* Initialize from cache */
-            cluster_init_from_cache(c, cc);
-        } else if (cluster_init_from_seeds(c, ht_seeds TSRMLS_CC) == SUCCESS) {
-            /* The invalid flag here means something is very wrong (e.g. something
-             * in the persistent_list that isn't a cluster cache */
-            if (!invalid) {
-                cluster_store_cache(hash, len, c->nodes TSRMLS_CC);
-            }
+    if ((cc = cluster_load_cache(hash, len, &invalid TSRMLS_CC))) {
+        /* Initialize from cache */
+        cluster_init_from_cache(c, cc);
+    } else if (cluster_init_from_seeds(c, ht_seeds TSRMLS_CC) == SUCCESS) {
+        /* The invalid flag here means something is very wrong (e.g. something
+         * in the persistent_list that isn't a cluster cache */
+        if (!invalid) {
+            cluster_store_cache(hash, len, c->nodes TSRMLS_CC);
         }
-        efree(hash);
-    } else {
-        cluster_init_from_seeds(c, ht_seeds TSRMLS_CC);
     }
+    efree(hash);
 }
 
 /* Attempt to load a named cluster configured in php.ini */
