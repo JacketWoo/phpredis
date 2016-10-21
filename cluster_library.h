@@ -69,8 +69,12 @@
 
 /* Protected sending of data down the wire to a RedisSock->stream */
 #define CLUSTER_SEND_PAYLOAD(sock, buf, len) \
-    (sock && sock->stream && !redis_check_eof(sock, 1 TSRMLS_CC) && \
-     php_stream_write(sock->stream, buf, len)==len)
+    ((sock && sock->stream && !redis_check_eof(sock, 1 TSRMLS_CC) && \
+     php_stream_write(sock->stream, buf, len)==len) || \
+     ((sock->stream == NULL ? : redis_stream_close(sock)), \
+       sock->lazy_connect = 1, \
+       sock->status = REDIS_SOCK_STATUS_DISCONNECTED, \
+       0))
 
 /* Macro to read our reply type character */
 #define CLUSTER_VALIDATE_REPLY_TYPE(sock, type) \
@@ -151,15 +155,55 @@ typedef enum CLUSTER_REDIR_TYPE {
 typedef int  (*mbulk_cb)(RedisSock*,zval*,long long, void* TSRMLS_DC);
 
 /* Specific destructor to free a cluster object */
-// void redis_destructor_redis_cluster(zend_rsrc_list_entry *rsrc TSRMLS_DC);
+//void redis_destructor_redis_cluster(zend_rsrc_list_entry *rsrc TSRMLS_DC);
+
+typedef struct clusterSlotRange {
+    unsigned short low, high;
+} clusterSlotRange;
+
+/* Minimal linked list structure to store slot ranges which we use to efficiently
+ * generate persistent slot caching */
+typedef struct clusterRangeList {
+    clusterSlotRange slots;
+    struct clusterRangeList *next;
+} clusterRangeList;
+
+/* Simple host/port information for our cache */
+typedef struct clusterCachedHost {
+    char *addr;
+    size_t addrlen;
+    short port;
+} clusterCachedHost;
+
+/* Storage for a cached master node */
+typedef struct clusterCachedMaster {
+    clusterCachedHost host;
+    clusterRangeList *slots;
+
+    clusterCachedHost *slave;
+    size_t count;
+} clusterCachedMaster;
+
+typedef struct redisClusterCache {
+    int rsrc_id;
+    char *hash;
+    int hashlen;
+
+    /* Array of masters along with count */
+    clusterCachedMaster *master;
+    size_t count;
+} redisClusterCache;
 
 /* A Redis Cluster master node */
 typedef struct redisClusterNode {
     /* Our Redis socket in question */
     RedisSock *sock;
 
-    /* A slot where one of these lives */
+    /* One slot we believe this node serves */
     short slot;
+
+    /* Linked list of all slots we believe this node servers */
+    clusterRangeList *slots, *slotstail;
 
     /* Is this a slave node */
     unsigned short slave;
@@ -215,6 +259,12 @@ typedef struct redisCluster {
 
     /* Flag for when we get a CLUSTERDOWN error */
     short clusterdown;
+
+    /* Storage for the hash and hash len we're using if we were created from
+     * cached data and to keep track if we have been redirected during execution */
+    char *hash;
+    int hashlen;
+    unsigned short redirected;
 
     /* The last ERROR we encountered */
     char *err;
@@ -361,12 +411,24 @@ PHP_REDIS_API short cluster_find_slot(redisCluster *c, const char *host,
 PHP_REDIS_API int cluster_send_slot(redisCluster *c, short slot, char *cmd,
     int cmd_len, REDIS_REPLY_TYPE rtype TSRMLS_DC);
 
+PHP_REDIS_API int cluster_init_from_seeds(redisCluster *c, HashTable *seeds
+    TSRMLS_DC);
+
 PHP_REDIS_API redisCluster *cluster_create(double timeout, double read_timeout,
     int failover, int persistent);
 PHP_REDIS_API void cluster_free(redisCluster *c);
 PHP_REDIS_API int cluster_init_seeds(redisCluster *c, HashTable *ht_seeds);
 PHP_REDIS_API int cluster_map_keyspace(redisCluster *c TSRMLS_DC);
 PHP_REDIS_API void cluster_free_node(redisClusterNode *node);
+
+/*
+ * Cache mechanisms
+ * */
+PHP_REDIS_API int cluster_init_from_cache(redisCluster *c, redisClusterCache *cc);
+
+PHP_REDIS_API clusterRangeList *cluster_dup_range_list(clusterRangeList *src,
+    int persistent);
+PHP_REDIS_API void cluster_free_cached_master(clusterCachedMaster *m);
 
 PHP_REDIS_API char **cluster_sock_read_multibulk_reply(RedisSock *redis_sock,
     int *len TSRMLS_DC);

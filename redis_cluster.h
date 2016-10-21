@@ -5,6 +5,10 @@
 #include <php.h>
 #include <stddef.h>
 
+/* Slot cache resource name */
+#define CLUSTER_SLOT_CACHE_NAME   "RedisCluster slot cache"
+#define CLUSTER_HASH_PREFIX "redisSlotCache:"
+
 /* Redis cluster hash slots and N-1 which we'll use to find it */
 #define REDIS_CLUSTER_SLOTS 16384
 #define REDIS_CLUSTER_MOD   (REDIS_CLUSTER_SLOTS-1)
@@ -109,6 +113,9 @@ zend_object *create_cluster_context(zend_class_entry *class_type
 
 /* Inittialize our class with PHP */
 void init_rediscluster(TSRMLS_D);
+
+/* Cluster slot cache destructor */
+void cluster_slot_cache_dtor(zend_rsrc_list_entry *rsrc TSRMLS_DC);
 
 /* RedisCluster method implementation */
 PHP_METHOD(RedisCluster, __construct);

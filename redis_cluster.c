@@ -34,10 +34,14 @@
 #include <SAPI.h>
 
 zend_class_entry *redis_cluster_ce;
+int le_cluster_slot_cache;
 
 /* Exception handler */
 zend_class_entry *redis_cluster_exception_ce;
 zend_class_entry *spl_rte_ce = NULL;
+
+/* Slot cache resource id */
+int le_slot_cache;
 
 /* Handlers for RedisCluster */
 zend_object_handlers RedisCluster_handlers;
@@ -256,6 +260,8 @@ PHP_REDIS_API zend_class_entry *rediscluster_get_exception_base(int root) {
 	return zend_ce_exception;
 }
 
+static void cluster_delete_cache(char *hash, int hashlen TSRMLS_DC);
+
 /* Free redisCluster context */
 void free_cluster_context(zend_object *object) {
     redisCluster *cluster;
@@ -275,10 +281,194 @@ void free_cluster_context(zend_object *object) {
     zend_hash_destroy(cluster->nodes);
     efree(cluster->nodes);
 
+    /* If we were initialized from cache, check if we need to invalidate and
+     * also free our hash string */
+    if (cluster->hash) {
+        if (cluster->redirected) {
+            cluster_delete_cache(cluster->hash, cluster->hashlen TSRMLS_CC);
+        }
+        efree(cluster->hash);
+    }
+
     if(cluster->err) efree(cluster->err);
 
     // Finally, free the redisCluster structure itself
     //efree(cluster);
+}
+
+static void redis_cluster_cache_dtor(redisClusterCache *cc) {
+    size_t i;
+
+    /* Free each master */
+    for (i = 0; i < cc->count; i++) {
+        cluster_free_cached_master(&cc->master[i]);
+    }
+
+    /* Free hash (we call free directly because zend_strndup calls malloc) */
+    free(cc->hash);
+
+    /* Free master array  */
+    pefree(cc->master, 1);
+
+    /* Free struct itself */
+    pefree(cc, 1);
+}
+
+/* Cluster slot cache destructor */
+void cluster_slot_cache_dtor(zend_resource *rsrc TSRMLS_DC) {
+    redis_cluster_cache_dtor((redisClusterCache*)rsrc->ptr);
+}
+
+/* Simple mechanism to hash our seed array into a string we can look up */
+static int cluster_hash_seeds(HashTable *ht, char **ret) {
+    smart_str hash = {0};
+    zval **seed;
+
+    /* Append our prefix */
+    smart_str_appendl(&hash, CLUSTER_HASH_PREFIX, sizeof(CLUSTER_HASH_PREFIX)-1);
+
+    for (zend_hash_internal_pointer_reset(ht);
+         zend_hash_has_more_elements(ht) == SUCCESS;
+         zend_hash_move_forward(ht))
+    {
+        zend_hash_get_current_data(ht, (void**)&seed);
+        if (Z_TYPE_PP(seed) == IS_STRING) {
+            smart_str_appendc(&hash, '[');
+            smart_str_appendl(&hash, Z_STRVAL_PP(seed), Z_STRLEN_PP(seed));
+            smart_str_appendc(&hash, ']');
+        }
+    }
+
+    smart_str_0(&hash);
+
+    *ret = hash.c;
+    return hash.len;
+}
+
+/* Delete/Invalidate cached slot information */
+static void cluster_delete_cache(char *hash, int len TSRMLS_DC) {
+    if (zend_hash_del(&EG(persistent_list), hash, len+1) == SUCCESS) {
+        php_printf("deleted cache\n");
+    } else {
+        php_printf("couldn't delete cache\n");
+    }
+}
+
+/* Attempt to find cached slot information */
+static redisClusterCache *cluster_load_cache(char *hash, int len, int *err TSRMLS_DC) {
+    zend_rsrc_list_entry *le;
+
+    /* Hash seeds then attempt to find cached slots */
+    if (zend_hash_find(&EG(persistent_list), hash, len+1, (void*)&le) == SUCCESS) {
+        /* Sanity check on resource retreival */
+        if (!le || le->type != le_cluster_slot_cache) {
+            *err = 1;
+            php_error_docref(0 TSRMLS_CC, E_WARNING, "Invalid cluster slot cache found; reverting to non persistent");
+            return NULL;
+        }
+
+        /* Success, return cache */
+        return (redisClusterCache*)le->ptr;
+    }
+
+    /* Failure */
+    return NULL;
+}
+
+/* Duplicate slave information */
+clusterCachedHost *slave_host_dup(HashTable *ht, size_t *count)
+{
+    redisClusterNode **node;
+    clusterCachedHost *host;
+    size_t i = 0;
+
+    /* Sanity check on a NULL or empty slave hash table */
+    if (!ht || zend_hash_num_elements(ht) == 0) {
+        return NULL;
+    }
+
+    /* Set our count and allocate storage */
+    *count = zend_hash_num_elements(ht);
+    host = pecalloc(*count, sizeof(*host), 1);
+
+    /* Iterate and copy over host information */
+    for (zend_hash_internal_pointer_reset(ht);
+         zend_hash_get_current_data(ht, (void**)&node) == SUCCESS;
+         zend_hash_move_forward(ht), i++)
+    {
+        host[i].addrlen = strlen((*node)->sock->host);
+        host[i].addr = zend_strndup((*node)->sock->host, host[i].addrlen);
+        host[i].port = (*node)->sock->port;
+    }
+
+    return host;
+}
+
+/* Cache information from a redisCluster object that was able to map the keyspace */
+static redisClusterCache *cluster_cache_create(HashTable *nodes, char *hash, int hashlen) {
+    redisClusterCache *cc;
+    clusterCachedMaster *cm;
+    redisClusterNode **node;
+
+    cc = pecalloc(1, sizeof(*cc), 1);
+
+    /* Retain our hash and length */
+    cc->hash = zend_strndup(hash, hashlen);
+    cc->hashlen = hashlen;
+
+    /* Iterate over nodes pulling information */
+    cc->master = pecalloc(zend_hash_num_elements(nodes), sizeof(*cc->master), 1);
+    for (zend_hash_internal_pointer_reset(nodes);
+         zend_hash_get_current_data(nodes, (void**)&node) == SUCCESS;
+         zend_hash_move_forward(nodes))
+    {
+        /* Skip slaves */
+        if ((*node)->slave) continue;
+
+        /* Set this host information */
+        cm = &cc->master[cc->count];
+        cm->host.addrlen = strlen((*node)->sock->host);
+        cm->host.addr = zend_strndup((*node)->sock->host, cm->host.addrlen);
+        cm->host.port = (*node)->sock->port;
+
+        /* Duplicate slot range list and copy slave information */
+        cm->slots = cluster_dup_range_list((*node)->slots, 1);
+        cm->slave = slave_host_dup((*node)->slaves, &cm->count);
+
+        /* Increment the number of masters we have */
+        cc->count++;
+    }
+
+    /* Trim allocation down to only the number of masters */
+    cc->master = perealloc(cc->master, cc->count * sizeof(*cc->master), 1);
+
+    /* Return our cluster cache */
+    return cc;
+}
+
+/* Cache slot information */
+static int cluster_store_cache(char *hash, int hashlen, HashTable *nodes TSRMLS_DC) {
+    redisClusterCache *cc;
+    zend_resource le;
+
+    /* Create our cache */
+    cc = cluster_cache_create(nodes, hash, hashlen);
+
+    /* Spin up our list entry */
+    le.type = le_cluster_slot_cache;
+    le.ptr = cc;
+
+    /* Register it with PHP */
+//    cc->rsrc_id = ZEND_REGISTER_RESOURCE(NULL, cc, le_cluster_slot_cache);
+
+    /* Now attempt to store our cache */
+    if (zend_hash_update(&EG(persistent_list), hash, hashlen+1, &le, sizeof(zend_rsrc_list_entry), NULL) == FAILURE) {
+        php_error_docref(0 TSRMLS_CC, E_WARNING, "Failed to cache cluster slot information");
+        redis_cluster_cache_dtor(cc);
+        return FAILURE;
+    }
+
+    return SUCCESS;
 }
 
 /* Create redisCluster context */
@@ -319,23 +509,22 @@ create_cluster_context(zend_class_entry *class_type TSRMLS_DC) {
 void redis_cluster_init(redisCluster *c, HashTable *ht_seeds, double timeout,
                         double read_timeout, int persistent TSRMLS_DC)
 {
-    // Validate timeout
-    if(timeout < 0L || timeout > INT_MAX) {
-        zend_throw_exception(redis_cluster_exception_ce,
-            "Invalid timeout", 0 TSRMLS_CC);
+    redisClusterCache *cc;
+    char *hash, *err = NULL;
+    int len, invalid = 0;
+
+    /* Sanity check arguments */
+    if (timeout < 0L || timeout > INT_MAX) {
+        err = "Invalid timeout";
+    } else if (read_timeout < 0L || read_timeout > INT_MAX) {
+        err = "Invalid read timeout";
+    } else if (zend_hash_num_elements(ht_seeds) == 0) {
+        err = "Must pass at least one seed node";
     }
 
-    // Validate our read timeout
-    if(read_timeout < 0L || read_timeout > INT_MAX) {
-        zend_throw_exception(redis_cluster_exception_ce,
-            "Invalid read timeout", 0 TSRMLS_CC);
-    }
-
-    /* Make sure there are some seeds */
-    if(zend_hash_num_elements(ht_seeds)==0) {
-        zend_throw_exception(redis_cluster_exception_ce,
-            "Must pass seeds", 0 TSRMLS_CC);
-    }
+    if (err != NULL) {
+        zend_throw_exception(redis_cluster_exception_ce, err, 0 TSRMLS_CC);
+     }
 
     /* Set our timeout and read_timeout which we'll pass through to the
      * socket type operations */
@@ -349,11 +538,20 @@ void redis_cluster_init(redisCluster *c, HashTable *ht_seeds, double timeout,
      * (e.g. a node goes down), which is not the same as a standard timeout. */
     c->waitms = (long)(timeout * 1000);
 
-    // Initialize our RedisSock "seed" objects
-    cluster_init_seeds(c, ht_seeds);
+    /* If we're persistent, attempt to load cached map for nodes and keyspace */
+    len = cluster_hash_seeds(ht_seeds, &hash);
 
-    // Create and map our key space
-    cluster_map_keyspace(c TSRMLS_CC);
+    if ((cc = cluster_load_cache(hash, len, &invalid TSRMLS_CC))) {
+        /* Initialize from cache */
+        cluster_init_from_cache(c, cc);
+    } else if (cluster_init_from_seeds(c, ht_seeds TSRMLS_CC) == SUCCESS) {
+        /* The invalid flag here means something is very wrong (e.g. something
+         * in the persistent_list that isn't a cluster cache */
+        if (!invalid) {
+            cluster_store_cache(hash, len, c->nodes TSRMLS_CC);
+        }
+    }
+    efree(hash);
 }
 
 /* Attempt to load a named cluster configured in php.ini */

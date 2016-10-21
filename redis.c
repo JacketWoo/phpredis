@@ -47,8 +47,10 @@
 #define R_SUB_CALLBACK_FT_TYPE 2
 #define R_SUB_CLOSURE_TYPE 3
 
+
 int le_redis_sock;
 extern int le_redis_array;
+extern int le_cluster_slot_cache;
 
 #ifdef PHP_SESSION
 extern ps_module ps_mod_redis;
@@ -570,6 +572,9 @@ PHP_MINIT_FUNCTION(redis)
     redis_cluster_ce = zend_register_internal_class(&redis_cluster_class_entry
         TSRMLS_CC);
     redis_cluster_ce->create_object = create_cluster_context;
+
+    le_cluster_slot_cache = zend_register_list_destructors_ex(
+        NULL, cluster_slot_cache_dtor, CLUSTER_SLOT_CACHE_NAME, module_number);
 
     le_redis_array = zend_register_list_destructors_ex(
         redis_destructor_redis_array,
