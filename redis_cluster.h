@@ -115,7 +115,7 @@ zend_object *create_cluster_context(zend_class_entry *class_type
 void init_rediscluster(TSRMLS_D);
 
 /* Cluster slot cache destructor */
-void cluster_slot_cache_dtor(zend_rsrc_list_entry *rsrc TSRMLS_DC);
+void cluster_slot_cache_dtor(zend_resource *rsrc TSRMLS_DC);
 
 /* RedisCluster method implementation */
 PHP_METHOD(RedisCluster, __construct);

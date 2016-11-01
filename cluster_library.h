@@ -155,7 +155,7 @@ typedef enum CLUSTER_REDIR_TYPE {
 typedef int  (*mbulk_cb)(RedisSock*,zval*,long long, void* TSRMLS_DC);
 
 /* Specific destructor to free a cluster object */
-//void redis_destructor_redis_cluster(zend_rsrc_list_entry *rsrc TSRMLS_DC);
+//void redis_destructor_redis_cluster(zend_resource *rsrc TSRMLS_DC);
 
 typedef struct clusterSlotRange {
     unsigned short low, high;

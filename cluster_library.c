@@ -678,7 +678,7 @@ static void cluster_node_add_slot_range(redisClusterNode *node, unsigned short l
 	clusterRangeList *rl = emalloc(sizeof(*rl));
 	/* Init entry */
 	rl->slots.low = low;
-	rl->slots.hight = high;
+	rl->slots.high = high;
 	rl->next = NULL;
 
 	/* Append our create to our node range list */
@@ -765,7 +765,7 @@ static void cluster_free_range_list(clusterRangeList* list, int persistent) {
 
 	/* Free each element */
 	while (p) {
-		tmp = p->next();
+		tmp = p->next;
 		pefree(p, persistent);
 		p = tmp;
 	}
@@ -777,13 +777,13 @@ PHP_REDIS_API void cluster_free_node(redisClusterNode *node) {
         zend_hash_destroy(node->slaves);
         efree(node->slaves);
     }
-	clusterRangeList(node->slots, 0);
+	cluster_free_range_list(node->slots, 0);
     redis_free_socket(node->sock);
     efree(node);
 }
 
 /*Duplicate a range list */
-PHP_REDIS_API clusterRangeList* cluster_dump_range_list(clusterRangeList* src,
+PHP_REDIS_API clusterRangeList* cluster_dup_range_list(clusterRangeList* src,
 														int persistent) {
 	clusterRangeList *ret, **tail = &ret;
 	if (src == NULL) {
@@ -796,7 +796,7 @@ PHP_REDIS_API clusterRangeList* cluster_dump_range_list(clusterRangeList* src,
 		(*tail)->next = NULL;
 		tail = &(*tail)->next;
 	}
-	return ert;
+	return ret;
 }
 
 /* Free a cached master. This is always coming from the RedisCluster cache machanism, 
@@ -977,7 +977,7 @@ int cluster_init_from_cache(redisCluster *c, redisClusterCache *cc)
             c->timeout, c->persistent, NULL, 0, 0);
 
         /* Add to seed nodes */
-        zend_hash_update(c->seeds, key, keylen+1, (void*)&sock, sizeof(RedisSock*), NULL);
+        zend_hash_str_update_ptr(c->seeds, key, keylen+1, sock);
 
         /* Create master node, duplicate slot ranges and NULL slotstail (we don't
          * need rangetail as it's only on non-cached instancing) */
@@ -986,7 +986,7 @@ int cluster_init_from_cache(redisCluster *c, redisClusterCache *cc)
         mnode->slotstail = NULL;
 
         /* Add master node */
-        zend_hash_update(c->nodes, key, keylen+1, (void*)&mnode, sizeof(redisClusterNode*),NULL);
+        zend_hash_str_update_ptr(c->nodes, key, keylen+1, mnode);
 
         /* Add any and all slaves */
         for (s = 0; s < cm->count; s++) {
